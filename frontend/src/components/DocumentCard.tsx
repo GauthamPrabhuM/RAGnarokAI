@@ -41,7 +41,7 @@ export default function DocumentCard({ document, onDelete, isDeleting }: Documen
     });
   };
 
-  const getFileIcon = (contentType: string) => {
+  const getFileIcon = () => {
     // Could add different icons based on content type
     return <FileText className="w-10 h-10 text-primary-500" />;
   };
@@ -51,7 +51,7 @@ export default function DocumentCard({ document, onDelete, isDeleting }: Documen
       <div className="flex items-start gap-4">
         {/* File Icon */}
         <div className="p-3 bg-primary-50 rounded-lg">
-          {getFileIcon(document.contentType)}
+          {getFileIcon()}
         </div>
 
         {/* Content */}

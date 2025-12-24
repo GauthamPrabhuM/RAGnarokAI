@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import ChatInterface from '../components/ChatInterface';
-import { Document, QueryResponse } from '../types';
+import { Document } from '../types';
 import { documentService } from '../services/api';
 
 interface ChatMessage {

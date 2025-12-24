@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Upload, FileText, Loader2, CheckCircle, XCircle } from 'lucide-react';
+import { Upload, Loader2, CheckCircle, XCircle } from 'lucide-react';
 import { documentService } from '../services/api';
 import { Document } from '../types';
 
