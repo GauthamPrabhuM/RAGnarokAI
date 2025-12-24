@@ -1,0 +1,329 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  RAGnarokAI - Intelligent Document Analysis Platform
+  A serverless application for document analysis using AWS AI services and RAG
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: python3.11
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        DOCUMENTS_BUCKET: !Ref DocumentsBucket
+        DOCUMENTS_TABLE: !Ref DocumentsTable
+        AWS_REGION: !Ref AWS::Region
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment
+
+  BedrockModelId:
+    Type: String
+    Default: anthropic.claude-3-haiku-20240307-v1:0
+    Description: Amazon Bedrock model ID to use
+
+Resources:
+  # ============================================
+  # S3 Bucket for Document Storage
+  # ============================================
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'ragnarokai-documents-${Environment}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - DELETE
+            AllowedOrigins:
+              - '*'
+            MaxAge: 3600
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ============================================
+  # DynamoDB Table for Document Metadata
+  # ============================================
+  DocumentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'RAGnarokAIDocuments-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: documentId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: documentId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: userId-createdAt-index
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+
+  # ============================================
+  # API Gateway
+  # ============================================
+  DocuMindApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub 'RAGnarokAI-API-${Environment}'
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-User-Id,Authorization'"
+        AllowOrigin: "'*'"
+
+  # ============================================
+  # Lambda Functions
+  # ============================================
+
+  # Upload Handler
+  UploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'RAGnarokAI-Upload-${Environment}'
+      Handler: handlers.upload.lambda_handler
+      CodeUri: src/
+      Description: Handles document uploads and generates presigned URLs
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref DocumentsBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+      Events:
+        GetUploadUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DocuMindApi
+            Path: /upload
+            Method: GET
+        ConfirmUpload:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DocuMindApi
+            Path: /upload
+            Method: POST
+
+  # Text Extraction Handler
+  ExtractFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'RAGnarokAI-Extract-${Environment}'
+      Handler: handlers.extract.lambda_handler
+      CodeUri: src/
+      Description: Extracts text from documents using Amazon Textract
+      Timeout: 60
+      MemorySize: 512
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref DocumentsBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - textract:DetectDocumentText
+                - textract:AnalyzeDocument
+              Resource: '*'
+      Events:
+        ExtractApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DocuMindApi
+            Path: /documents/{documentId}/extract
+            Method: POST
+        S3Upload:
+          Type: S3
+          Properties:
+            Bucket: !Ref DocumentsBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: documents/
+
+  # Summarization Handler
+  SummarizeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'RAGnarokAI-Summarize-${Environment}'
+      Handler: handlers.summarize.lambda_handler
+      CodeUri: src/
+      Description: Generates AI summaries using Amazon Bedrock
+      Timeout: 120
+      MemorySize: 512
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
+      Events:
+        SummarizeApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DocuMindApi
+            Path: /documents/{documentId}/summarize
+            Method: GET
+
+  # Q&A Handler
+  QueryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'RAGnarokAI-Query-${Environment}'
+      Handler: handlers.query.lambda_handler
+      CodeUri: src/
+      Description: Answers questions about documents using Amazon Bedrock
+      Timeout: 120
+      MemorySize: 512
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}'
+      Events:
+        QueryApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DocuMindApi
+            Path: /documents/{documentId}/query
+            Method: POST
+
+  # Documents CRUD Handler
+  DocumentsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'RAGnarokAI-Documents-${Environment}'
+      Handler: handlers.documents.lambda_handler
+      CodeUri: src/
+      Description: Handles document CRUD operations
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref DocumentsBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DocumentsTable
+      Events:
+        ListDocuments:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DocuMindApi
+            Path: /documents
+            Method: GET
+        GetDocument:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DocuMindApi
+            Path: /documents/{documentId}
+            Method: GET
+        DeleteDocument:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DocuMindApi
+            Path: /documents/{documentId}
+            Method: DELETE
+
+  # ============================================
+  # Frontend Hosting (Optional - S3 + CloudFront)
+  # ============================================
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'ragnarokai-frontend-${Environment}-${AWS::AccountId}'
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${DocuMindApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiUrl'
+
+  DocumentsBucketName:
+    Description: S3 bucket for document storage
+    Value: !Ref DocumentsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-DocumentsBucket'
+
+  DocumentsTableName:
+    Description: DynamoDB table for document metadata
+    Value: !Ref DocumentsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-DocumentsTable'
+
+  FrontendUrl:
+    Description: Frontend website URL
+    Value: !GetAtt FrontendBucket.WebsiteURL
+    Export:
+      Name: !Sub '${AWS::StackName}-FrontendUrl'
+
+  FrontendBucketName:
+    Description: Frontend S3 bucket name
+    Value: !Ref FrontendBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-FrontendBucket'
